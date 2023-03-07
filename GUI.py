@@ -43,7 +43,8 @@ class Demo:
                 img = tk.PhotoImage(file='mnist.jpg').subsample(6)
             elif v.get() == "cifar-10":
                 img = tk.PhotoImage(file='cifar.jpg').subsample(3)
-            li = tk.Label(self.root, image=img).place(x=290, y=40)
+            li = tk.Label(image=img)
+            li.place(x=290, y=40)
             li.image = img
 
         rate = 70  # TODO
