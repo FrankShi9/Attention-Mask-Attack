@@ -31,11 +31,31 @@ class Demo:
 
         return test_set, test_loader
 
-    def paint_img(self):# TODO
-        pass
-
     def load_model(self):# TODO
-        pass
+        class Fnn(nn.Module):
+            def __init__(self):
+                super(Fnn, self).__init__()
+                self.conv1 = nn.Conv2d(1, 32, kernel_size=(3, 3), stride=1, padding=1)
+                self.conv2 = nn.Conv2d(32, 64, kernel_size=(3, 3), stride=1, padding=1)
+                # self.dropout_2d = nn.Dropout2d(p=0.25)
+                self.fc1 = nn.Linear(7 * 7 * 64, 128)
+                self.dropout = nn.Dropout(p=0.5)
+                self.fc2 = nn.Linear(128, 10)
+
+            def forward(self, x):
+                x = F.max_pool2d(self.conv1(x), kernel_size=2)
+                x = F.max_pool2d(self.conv2(x), kernel_size=2)
+                x = x.view(-1, 7 * 7 * 64)  # flatten / reshape
+                x = F.relu(self.fc1(x))
+                x = self.dropout(x)
+                x = self.fc2(x)
+                return F.log_softmax(x, dim=1)
+
+        fnn = Fnn().to("cuda:0")
+        fnn.load_state_dict(torch.load('path')) # TODO
+        fnn.eval()
+        
+        return fnn
 
     def infer(self):# TODO
         pass
@@ -68,6 +88,11 @@ class Demo:
             li = tk.Label(image=img)
             li.place(x=290, y=40)
             li.image = img
+
+        def paint_img(event, fun, obj):  # TODO
+            pass
+            # img = fun()[0]
+            # obj.image = img1
 
         def paint_rate(event): # BUG
             rate = self.get_rate()
@@ -121,7 +146,7 @@ class Demo:
                             font=("arial", 10, "bold")).place(x=210, y=356)
 
         d, l = self.load_data()
-        print(d,l)
+
         # mainloop
         self.root.mainloop()
 
