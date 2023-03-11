@@ -26,12 +26,13 @@ class Demo:
         self.step_size = 0.005495
 
     def load_data(self):
-        test_set = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transforms.Compose([transforms.ToTensor()]))
+        test_set = torchvision.datasets.MNIST(root='./data', train=False, download=True,
+                                              transform=transforms.Compose([transforms.ToTensor()]))
         test_loader = DataLoader(test_set, batch_size=self.bs, shuffle=False, drop_last=True)
 
         return test_set, test_loader
 
-    def load_model(self):# TODO
+    def load_model(self):  # TODO
         class Fnn(nn.Module):
             def __init__(self):
                 super(Fnn, self).__init__()
@@ -52,18 +53,55 @@ class Demo:
                 return F.log_softmax(x, dim=1)
 
         fnn = Fnn().to("cuda:0")
-        fnn.load_state_dict(torch.load('path')) # TODO
+        fnn.load_state_dict(torch.load('path'))  # TODO
         fnn.eval()
-        
+
         return fnn
 
-    def infer(self):# TODO
-        pass
+    def infer(self, model, device, loader):  # TODO
+        model.eval()
+        test_loss = 0
+        correct = 0
+        idx = 0
+        with torch.no_grad():
+            for batch_idx, (data, target) in enumerate(loader):
+                data, target = data.to(device), target.to(device)
+                data = data.view(data.size(0), 28 * 28)
+                output = model(data)
+                test_loss += F.cross_entropy(output, target, size_average=False).item()
+                pred = output.max(1, keepdim=True)[1]
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                mis = self.bs-pred.eq(target.view_as(pred)).sum().item()
 
-    def attack(self):# TODO
-        pass
+        test_loss /= len(loader.dataset)
+        test_accuracy = correct / len(loader.dataset)
+        return test_loss, test_accuracy, mis
 
-    def get_rate(self):# TODO
+    def attack(self, bi, model, X, mask, y, epsilon, num_steps, step_size,
+               device, random=True):
+        X_pgd = Variable(X.data, requires_grad=True)
+
+        if random:
+            noise = torch.clamp(mask, -epsilon, epsilon).to(device)  # XAI mask
+            X_pgd = Variable(X_pgd.data + noise, requires_grad=True)
+        for _ in range(num_steps):
+            opt = optim.SGD([X_pgd], lr=1e-3)
+            opt.zero_grad()
+
+            with torch.enable_grad():
+                loss = F.cross_entropy(model(X_pgd), y)
+
+            loss.backward()
+            eta = torch.clamp(mask, -step_size,
+                              step_size) * X_pgd.grad.data.sign()
+            X_pgd = Variable(X_pgd.data + eta, requires_grad=True)
+            eta = torch.clamp(X_pgd.data - X.data, -epsilon, epsilon)
+            X_pgd = Variable(X.data + eta, requires_grad=True)
+            X_pgd = Variable(torch.clamp(X_pgd, 0, 1.0), requires_grad=True)
+
+        return X_pgd
+
+    def get_rate(self):  # TODO
         return 70
 
     def main(self):
@@ -94,10 +132,9 @@ class Demo:
             # img = fun()[0]
             # obj.image = img1
 
-        def paint_rate(event): # BUG
+        def paint_rate(event):  # BUG
             rate = self.get_rate()
             tk.Label(self.root, text=str(rate) + '%', font=("arial", 10), fg="black").place(x=340, y=220)
-
 
         self.root.geometry('512x512')
         self.root.resizable(True, True)
@@ -143,7 +180,7 @@ class Demo:
         btn_msk = tk.Button(self.root, text="Generate Mask", bd=1, command=None, bg="gray", height="1",
                             font=("arial", 10, "bold")).place(x=210, y=306)
         btn_att_msk = tk.Button(self.root, text="Masked Attack", bd=1, command=None, bg="gray", height="1",
-                            font=("arial", 10, "bold")).place(x=210, y=356)
+                                font=("arial", 10, "bold")).place(x=210, y=356)
 
         d, l = self.load_data()
 
