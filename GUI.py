@@ -1,4 +1,6 @@
 import tkinter as tk
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +13,139 @@ from torch.autograd import Variable
 import time
 from datetime import datetime
 import math
+import torchvision.transforms as T
+from PIL import Image
+
+
+def SLU(x, a=.5):
+    return torch.max(torch.zeros_like(x), x) + a * torch.sin(x)
+
+def g_normal_(
+        tensor, in_c, out_c, kernel_size):
+    # if 0 in tensor.shape:
+    #     warnings.warn("Initializing zero-element tensors is a no-op")
+    #     return tensor
+    std = 2 / ((in_c + out_c) * kernel_size)
+    with torch.no_grad():
+        return tensor.normal_(0, std)
+
+class Fnn(nn.Module):
+    def __init__(self):
+        super(Fnn, self).__init__()
+        self.fc1 = nn.Linear(28 * 28, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, 10)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        x = self.fc3(x)
+        x = F.relu(x)
+        x = self.fc4(x)
+        x = F.relu(x)
+        x = F.log_softmax(x, dim=1)
+        return x
+
+
+class Block(nn.Module):  # vgg/res inspired
+    def __init__(self, in_c, out_c):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_c, out_c, 3, 1, 1)
+        g_normal_(self.conv1.weight, in_c, out_c, 3)  # init
+        self.bn = nn.BatchNorm2d(out_c)
+        # self.lrelu = nn.LeakyReLU(0.1)
+        self.elu = nn.ELU()
+        self.conv2 = nn.Conv2d(out_c, out_c, 3, 1, 1)
+        self.gn = nn.GroupNorm(8, out_c)
+        self.dropout = nn.Dropout2d(p=.25)
+
+    def forward(self, x):
+        # return self.gm(self.lrelu(self.conv2(SLU(self.conv1(x)))))
+
+        y = self.conv1(x)
+        identity = y
+        y = self.bn(y)
+        y = SLU(y)
+        y = self.conv2(y)
+        y = self.gn(y)
+        y = self.dropout(y)
+
+        y += identity
+        y = self.elu(y)
+
+        return y
+
+
+class Encoder(nn.Module):
+    def __init__(self, chs=(3, 64, 128, 256)):
+        super().__init__()
+        self.enc_blocks = nn.ModuleList([Block(chs[i], chs[i + 1]) for i in range(len(chs) - 1)])
+        # self.pool = nn.MaxPool2d(2)
+        self.pool_blks = nn.ModuleList([nn.Conv2d(chs[i + 1], chs[i + 1], 1, 2, 0) for i in range(len(chs) - 1)])
+
+    def forward(self, x, cifar=False):
+        if not cifar:
+            x = x.reshape(self.bs, 1, 28, 28)
+            x = x.repeat(1, 3, 1, 1)
+
+        ftrs = []
+        i = 1
+        for (idx, block) in enumerate(self.enc_blocks):
+            x = block(x)
+            ftrs.append(x)
+            # x = self.pool(x)
+            x = self.pool_blks[idx](x)
+            i += 1
+
+        return ftrs
+
+
+class Decoder(nn.Module):
+    def __init__(self, chs=(256, 128, 64)):
+        super().__init__()
+        self.chs = chs
+        self.upconvs = nn.ModuleList([nn.ConvTranspose2d(chs[i], chs[i + 1], 2, 2, 0) for i in range(len(chs) - 1)])
+        self.dec_blocks = nn.ModuleList([Block(chs[i], chs[i + 1]) for i in range(len(chs) - 1)])
+
+    def forward(self, x, encoder_features, cifar=False):
+        for i in range(len(self.chs) - 1):
+            x = self.upconvs[i](x)
+            enc_ftrs = self.crop(encoder_features[i], x)
+            x = torch.cat([x, enc_ftrs], dim=1)
+            x = self.dec_blocks[i](x)
+
+        return x
+
+    def crop(self, enc_ftrs, x):
+        _, _, H, W = x.shape
+        enc_ftrs = torchvision.transforms.CenterCrop([H, W])(enc_ftrs)
+        return enc_ftrs
+
+
+class UNet(nn.Module):
+    def __init__(self, enc_chs=(3, 64, 128, 256), dec_chs=(256, 128, 64), num_class=1, retain_dim=False,
+                 out_sz=(28, 28)):
+        super().__init__()
+        self.encoder = Encoder(enc_chs)
+        self.decoder = Decoder(dec_chs)
+        self.head = nn.Conv2d(dec_chs[-1], num_class, 1)
+        self.retain_dim = retain_dim
+        self.out_sz = out_sz
+
+    def forward(self, x):
+        enc_ftrs = self.encoder(x)
+        out = self.decoder(enc_ftrs[::-1][0], enc_ftrs[::-1][1:])
+        out = self.head(out)
+
+        if self.retain_dim:
+            out = F.interpolate(out, self.out_sz)
+
+        return out
+
+
 
 
 class Demo:
@@ -24,61 +159,73 @@ class Demo:
         self.epsilon = 0.1099
         self.num_steps = 20
         self.step_size = 0.005495
-
-    def load_data(self):
-        test_set = torchvision.datasets.MNIST(root='./data', train=False, download=True,
+        self.test_set = torchvision.datasets.MNIST(root='./data', train=False, download=True,
                                               transform=transforms.Compose([transforms.ToTensor()]))
-        test_loader = DataLoader(test_set, batch_size=self.bs, shuffle=False, drop_last=True)
+        self.test_loader = DataLoader(self.test_set, batch_size=self.bs, shuffle=False, drop_last=True)
+        self.fnn = Fnn().to(self.device)
+        self.fnn.load_state_dict(torch.load('fnn.pt'))
+        self.fnn.eval()
+        self.unet = UNet().to(self.device)
+        self.unet.load_state_dict(torch.load('u.pt'))
+        self.unet.eval()
 
-        return test_set, test_loader
+    # infer
+    # def infer(self, data, lb):
+    #     loader = self.test_loader
+    #     device = self.device
+    #     model = self.fnn()
+    #     model.eval()
+    #     test_loss = 0
+    #     correct = 0
+    #     idx = 0
+    #     with torch.no_grad():
+    #         for batch_idx, (data, target) in enumerate(loader):
+    #             data, target = data.to(device), target.to(device)
+    #             data = data.view(data.size(0), 28 * 28)
+    #             output = model(data)
+    #             test_loss += F.cross_entropy(output, target, size_average=False).item()
+    #             pred = output.max(1, keepdim=True)[1]
+    #             correct += pred.eq(target.view_as(pred)).sum().item()
+    #             mis = self.bs-pred.eq(target.view_as(pred)).sum().item()
+    #
+    #     test_loss /= len(loader.dataset)
+    #     test_accuracy = correct / len(loader.dataset)
+    #     return test_loss, test_accuracy, mis
 
-    def load_model(self):  # TODO
-        class Fnn(nn.Module):
-            def __init__(self):
-                super(Fnn, self).__init__()
-                self.conv1 = nn.Conv2d(1, 32, kernel_size=(3, 3), stride=1, padding=1)
-                self.conv2 = nn.Conv2d(32, 64, kernel_size=(3, 3), stride=1, padding=1)
-                # self.dropout_2d = nn.Dropout2d(p=0.25)
-                self.fc1 = nn.Linear(7 * 7 * 64, 128)
-                self.dropout = nn.Dropout(p=0.5)
-                self.fc2 = nn.Linear(128, 10)
+    def attack0(self, X, y, random=True):
+        epsilon = self.epsilon
+        num_steps = self.num_steps
+        step_size = self.step_size
+        device = self.device
+        model = self.fnn
+        X_pgd = Variable(X.data, requires_grad=True)
 
-            def forward(self, x):
-                x = F.max_pool2d(self.conv1(x), kernel_size=2)
-                x = F.max_pool2d(self.conv2(x), kernel_size=2)
-                x = x.view(-1, 7 * 7 * 64)  # flatten / reshape
-                x = F.relu(self.fc1(x))
-                x = self.dropout(x)
-                x = self.fc2(x)
-                return F.log_softmax(x, dim=1)
+        if random:
+            noise = torch.FloatTensor(*X_pgd.shape).uniform_(epsilon).to(device)
+            X_pgd = Variable(X_pgd.data + noise, requires_grad=True)
+        for _ in range(num_steps):
+            opt = optim.SGD([X_pgd], lr=1e-3)
+            opt.zero_grad()
 
-        fnn = Fnn().to("cuda:0")
-        fnn.load_state_dict(torch.load('path'))  # TODO
-        fnn.eval()
+            with torch.enable_grad():
+                loss = F.cross_entropy(model(X_pgd), y)
 
-        return fnn
+            loss.backward()
+            eta = torch.clamp(X_pgd.data, -step_size,
+                              step_size) * X_pgd.grad.data.sign()
+            X_pgd = Variable(X_pgd.data + eta, requires_grad=True)
+            eta = torch.clamp(X_pgd.data - X.data, -epsilon, epsilon)
+            X_pgd = Variable(X.data + eta, requires_grad=True)
+            X_pgd = Variable(torch.clamp(X_pgd, 0, 1.0), requires_grad=True)
 
-    def infer(self, model, device, loader):  # TODO
-        model.eval()
-        test_loss = 0
-        correct = 0
-        idx = 0
-        with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(loader):
-                data, target = data.to(device), target.to(device)
-                data = data.view(data.size(0), 28 * 28)
-                output = model(data)
-                test_loss += F.cross_entropy(output, target, size_average=False).item()
-                pred = output.max(1, keepdim=True)[1]
-                correct += pred.eq(target.view_as(pred)).sum().item()
-                mis = self.bs-pred.eq(target.view_as(pred)).sum().item()
+        return X_pgd
 
-        test_loss /= len(loader.dataset)
-        test_accuracy = correct / len(loader.dataset)
-        return test_loss, test_accuracy, mis
-
-    def attack(self, bi, model, X, mask, y, epsilon, num_steps, step_size,
-               device, random=True):
+    def attack(self, X, mask, y, random=True):
+        epsilon = self.epsilon
+        num_steps = self.num_steps
+        step_size = self.step_size
+        device = self.device
+        model = self.fnn
         X_pgd = Variable(X.data, requires_grad=True)
 
         if random:
@@ -101,10 +248,29 @@ class Demo:
 
         return X_pgd
 
-    def get_rate(self):  # TODO
-        return 70
+    def mask(self, data):
+        model = self.unet
+        mask = model(data)
+
+        return mask
+
+    def get_rate(self, att=False, mask=False):
+        features, labels = next(iter(self.test_loader))
+        img = features[0].squeeze()
+        label = labels[0]
+
+        if att and not mask:
+            xa = self.attack0(img, label)
+            return float(nn.CosineSimilarity()(xa, img))
+
+        if att and mask:
+            mas = self.mask(img)
+            xa = self.attack(img, mas, label)
+            return float(nn.CosineSimilarity()(xa, img))
+
 
     def main(self):
+        sb, sa = 0, 0
         def callback(*args):
             print(f"the variable has changed to '{va.get()}'")
 
@@ -127,14 +293,46 @@ class Demo:
             li.place(x=290, y=40)
             li.image = img
 
-        def paint_img(event, fun, obj):  # TODO
-            pass
-            # img = fun()[0]
-            # obj.image = img1
+        def paint_img1(event):
+            global sb
+            features, labels = next(iter(self.test_loader))
+            img = features[0].squeeze()
+            label = labels[0]
+            xa = self.attack0(img, label)
+            transform = T.ToPILImage()
+            img = transform(xa)
+            li = tk.Label(image=img)
+            li.place(x=10, y=370)
+            li.image = img
 
-        def paint_rate(event):  # BUG
-            rate = self.get_rate()
-            tk.Label(self.root, text=str(rate) + '%', font=("arial", 10), fg="black").place(x=340, y=220)
+            sb = self.get_rate(True, False)
+
+        def paint_img2(event):
+            features, labels = next(iter(self.test_loader))
+            img = features[0].squeeze()
+            label = labels[0]
+            mas = self.mask(img)
+            transform = T.ToPILImage()
+            img = transform(mas)
+            li = tk.Label(image=img)
+            li.place(x=100, y=220)
+            li.image = img
+
+        def paint_img3(event):
+            global sa
+
+            features, labels = next(iter(self.test_loader))
+            img = features[0].squeeze()
+            label = labels[0]
+            mas = self.mask(img)
+            xa = self.attack(img, mas, label)
+            transform = T.ToPILImage()
+            img = transform(xa)
+            li = tk.Label(image=img)
+            li.place(x=100, y=370)
+            li.image = img
+
+            sa = self.get_rate(True, True)
 
         self.root.geometry('512x512')
         self.root.resizable(True, True)
@@ -169,20 +367,18 @@ class Demo:
         tk.Label(self.root, text="XAI mask pred:", font=("arial", 10), fg="black").place(x=100, y=200)
         tk.Label(self.root, text="pgd attack", font=("arial", 10), fg="black").place(x=10, y=350)
         tk.Label(self.root, text="disguised attack:", font=("arial", 10), fg="black").place(x=100, y=350)
-        tk.Label(self.root, text="Difference before:", font=("arial", 10), fg="black").place(x=320, y=200)
-
-        tk.Label(self.root, text="Difference after:", font=("arial", 10), fg="black").place(x=320, y=250)
-        tk.Label(self.root, text=str(30) + '%', font=("arial", 10), fg="black").place(x=340, y=270)
+        tk.Label(self.root, text="Similarity before:", font=("arial", 10), fg="black").place(x=320, y=200)
+        tk.Label(self.root, text=str(sb) + '%', font=("arial", 10), fg="black").place(x=340, y=220)
+        tk.Label(self.root, text="Similarity after:", font=("arial", 10), fg="black").place(x=320, y=250)
+        tk.Label(self.root, text=str(sa) + '%', font=("arial", 10), fg="black").place(x=340, y=270)
 
         # attack button
-        btn_att = tk.Button(self.root, text="Virgin Attack", bd=1, command=paint_rate, bg="gray", height="1",
+        btn_att = tk.Button(self.root, text="Virgin Attack", bd=1, command=paint_img1, bg="gray", height="1",
                             font=("arial", 10, "bold")).place(x=210, y=256)
-        btn_msk = tk.Button(self.root, text="Generate Mask", bd=1, command=None, bg="gray", height="1",
+        btn_msk = tk.Button(self.root, text="Mask", bd=1, command=paint_img2, bg="gray", height="1",
                             font=("arial", 10, "bold")).place(x=210, y=306)
-        btn_att_msk = tk.Button(self.root, text="Masked Attack", bd=1, command=None, bg="gray", height="1",
+        btn_att_msk = tk.Button(self.root, text="Masked Attack", bd=1, command=paint_img3, bg="gray", height="1",
                                 font=("arial", 10, "bold")).place(x=210, y=356)
-
-        d, l = self.load_data()
 
         # mainloop
         self.root.mainloop()
