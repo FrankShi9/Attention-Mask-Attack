@@ -1,11 +1,13 @@
 import tkinter as tk
 import warnings
 
+import PIL.Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
+from matplotlib import pyplot as plt
 from torchvision import transforms
 import torch.utils.data
 from torch.utils.data import DataLoader
@@ -14,14 +16,16 @@ import time
 from datetime import datetime
 import math
 import torchvision.transforms as T
-from PIL import Image
+from PIL import *
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+
+warnings.filterwarnings("ignore", category=Warning)
 
 def SLU(x, a=.5):
     return torch.max(torch.zeros_like(x), x) + a * torch.sin(x)
 
-def g_normal_(
-        tensor, in_c, out_c, kernel_size):
+def g_normal_(tensor, in_c, out_c, kernel_size):
     # if 0 in tensor.shape:
     #     warnings.warn("Initializing zero-element tensors is a no-op")
     #     return tensor
@@ -46,7 +50,7 @@ class Fnn(nn.Module):
         x = F.relu(x)
         x = self.fc4(x)
         x = F.relu(x)
-        x = F.log_softmax(x, dim=1)
+        x = F.log_softmax(x, dim=0)
         return x
 
 
@@ -88,7 +92,7 @@ class Encoder(nn.Module):
 
     def forward(self, x, cifar=False):
         if not cifar:
-            x = x.reshape(self.bs, 1, 28, 28)
+            x = x.reshape(1, 28, 28)
             x = x.repeat(1, 3, 1, 1)
 
         ftrs = []
@@ -146,8 +150,6 @@ class UNet(nn.Module):
         return out
 
 
-
-
 class Demo:
     def __init__(self, root):
         self.root = root
@@ -159,7 +161,7 @@ class Demo:
         self.epsilon = 0.1099
         self.num_steps = 20
         self.step_size = 0.005495
-        self.test_set = torchvision.datasets.MNIST(root='./data', train=False, download=True,
+        self.test_set = torchvision.datasets.MNIST(root='./data', train=True, download=True,
                                               transform=transforms.Compose([transforms.ToTensor()]))
         self.test_loader = DataLoader(self.test_set, batch_size=self.bs, shuffle=False, drop_last=True)
         self.fnn = Fnn().to(self.device)
@@ -250,27 +252,33 @@ class Demo:
 
     def mask(self, data):
         model = self.unet
-        mask = model(data)
+        mask = model(data.to(self.device))
 
         return mask
 
     def get_rate(self, att=False, mask=False):
         features, labels = next(iter(self.test_loader))
-        img = features[0].squeeze()
-        label = labels[0]
+        img = features[0].squeeze().view(28*28).to(self.device)
+        label = labels[0].to(self.device)
 
         if att and not mask:
             xa = self.attack0(img, label)
+            xa = xa.view(1,28*28)
+            img = img.view(1,28*28)
             return float(nn.CosineSimilarity()(xa, img))
 
         if att and mask:
-            mas = self.mask(img)
+            mas = self.mask(img).view(28*28)
             xa = self.attack(img, mas, label)
+            xa = xa.view(1,28*28)
+            img = img.view(1,28*28)
             return float(nn.CosineSimilarity()(xa, img))
 
 
     def main(self):
+
         sb, sa = 0, 0
+
         def callback(*args):
             print(f"the variable has changed to '{va.get()}'")
 
@@ -293,46 +301,55 @@ class Demo:
             li.place(x=290, y=40)
             li.image = img
 
-        def paint_img1(event):
+        def paint_img1():
             global sb
             features, labels = next(iter(self.test_loader))
-            img = features[0].squeeze()
-            label = labels[0]
-            xa = self.attack0(img, label)
+            img = features[0].squeeze().view(28*28).to(self.device)
+            label = labels[0].to(self.device)
+            xa = self.attack0(img, label).view(28,28)
             transform = T.ToPILImage()
             img = transform(xa)
-            li = tk.Label(image=img)
-            li.place(x=10, y=370)
-            li.image = img
+            fig1 = plt.figure(figsize=(1,1), dpi=110)
+            b1 = FigureCanvasTkAgg(fig1, self.root)
+            b1.get_tk_widget().place(x=10, y=370)
+            plt.imshow(img, cmap='gray')
 
             sb = self.get_rate(True, False)
+            #print(sb)
+            tk.Label(self.root, text=str(sb*100) + '%', font=("arial", 10), fg="black").place(x=340, y=220)
 
-        def paint_img2(event):
+        def paint_img2():
             features, labels = next(iter(self.test_loader))
-            img = features[0].squeeze()
-            label = labels[0]
-            mas = self.mask(img)
+            img = features[0].squeeze().to(self.device)
+            mas = self.mask(img).reshape(28,28)
             transform = T.ToPILImage()
             img = transform(mas)
-            li = tk.Label(image=img)
-            li.place(x=100, y=220)
-            li.image = img
+            # img.save("img2.jpg")
+            # img = tk.PhotoImage(file="img2.jpg")
+            fig3 = plt.figure(figsize=(1,1), dpi=110)
+            b3 = FigureCanvasTkAgg(fig3, self.root)
+            b3.get_tk_widget().place(x=100, y=220)
+            plt.imshow(img, cmap='gray')
 
-        def paint_img3(event):
+        def paint_img3():
             global sa
 
             features, labels = next(iter(self.test_loader))
-            img = features[0].squeeze()
-            label = labels[0]
+            img = features[0].squeeze().view(28*28).to(self.device)
+            label = labels[0].to(self.device)
             mas = self.mask(img)
-            xa = self.attack(img, mas, label)
+            xa = self.attack(img, mas.view(28*28), label).view(28,28)
             transform = T.ToPILImage()
             img = transform(xa)
-            li = tk.Label(image=img)
-            li.place(x=100, y=370)
-            li.image = img
+            fig2 = plt.figure(figsize=(1,1), dpi=110)
+            b2 = FigureCanvasTkAgg(fig2, self.root)
+            b2.get_tk_widget().place(x=100, y=370)
+            plt.imshow(img, cmap='gray')
 
             sa = self.get_rate(True, True)
+            print(sa)
+            tk.Label(self.root, text=str(sa*100) + '%', font=("arial", 10), fg="black").place(x=340, y=270)
+
 
         self.root.geometry('512x512')
         self.root.resizable(True, True)
@@ -373,11 +390,11 @@ class Demo:
         tk.Label(self.root, text=str(sa) + '%', font=("arial", 10), fg="black").place(x=340, y=270)
 
         # attack button
-        btn_att = tk.Button(self.root, text="Virgin Attack", bd=1, command=paint_img1, bg="gray", height="1",
+        tk.Button(self.root, text="Virgin Attack", bd=1, command=paint_img1, bg="gray", height="1",
                             font=("arial", 10, "bold")).place(x=210, y=256)
-        btn_msk = tk.Button(self.root, text="Mask", bd=1, command=paint_img2, bg="gray", height="1",
+        tk.Button(self.root, text="Mask", bd=1, command=paint_img2, bg="gray", height="1",
                             font=("arial", 10, "bold")).place(x=210, y=306)
-        btn_att_msk = tk.Button(self.root, text="Masked Attack", bd=1, command=paint_img3, bg="gray", height="1",
+        tk.Button(self.root, text="Masked Attack", bd=1, command=paint_img3, bg="gray", height="1",
                                 font=("arial", 10, "bold")).place(x=210, y=356)
 
         # mainloop
