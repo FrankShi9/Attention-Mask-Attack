@@ -324,8 +324,6 @@ class Demo:
             mas = self.mask(img).reshape(28,28)
             transform = T.ToPILImage()
             img = transform(mas)
-            # img.save("img2.jpg")
-            # img = tk.PhotoImage(file="img2.jpg")
             fig3 = plt.figure(figsize=(1,1), dpi=110)
             b3 = FigureCanvasTkAgg(fig3, self.root)
             b3.get_tk_widget().place(x=100, y=220)
