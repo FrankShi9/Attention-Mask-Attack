@@ -171,6 +171,8 @@ class Demo:
         self.unet.load_state_dict(torch.load('u.pt'))
         self.unet.eval()
 
+        self.t0 = 0
+        self.t1 = 0
     # infer
     # def infer(self, data, lb):
     #     loader = self.test_loader
@@ -201,7 +203,7 @@ class Demo:
         device = self.device
         model = self.fnn
         X_pgd = Variable(X.data, requires_grad=True)
-
+        st = time.time()
         if random:
             noise = torch.FloatTensor(*X_pgd.shape).uniform_(epsilon).to(device)
             X_pgd = Variable(X_pgd.data + noise, requires_grad=True)
@@ -219,7 +221,9 @@ class Demo:
             eta = torch.clamp(X_pgd.data - X.data, -epsilon, epsilon)
             X_pgd = Variable(X.data + eta, requires_grad=True)
             X_pgd = Variable(torch.clamp(X_pgd, 0, 1.0), requires_grad=True)
-
+        et = time.time()
+        t = et-st
+        self.t0 = t
         return X_pgd
 
     def attack(self, X, mask, y, random=True):
@@ -229,7 +233,7 @@ class Demo:
         device = self.device
         model = self.fnn
         X_pgd = Variable(X.data, requires_grad=True)
-
+        st = time.time()
         if random:
             noise = torch.clamp(mask, -epsilon, epsilon).to(device)  # XAI mask
             X_pgd = Variable(X_pgd.data + noise, requires_grad=True)
@@ -247,7 +251,9 @@ class Demo:
             eta = torch.clamp(X_pgd.data - X.data, -epsilon, epsilon)
             X_pgd = Variable(X.data + eta, requires_grad=True)
             X_pgd = Variable(torch.clamp(X_pgd, 0, 1.0), requires_grad=True)
-
+        et = time.time()
+        t = et-st
+        self.t1 = t
         return X_pgd
 
     def mask(self, data):
@@ -274,6 +280,14 @@ class Demo:
             img = img.view(1,28*28)
             return float(nn.CosineSimilarity()(xa, img))
 
+    def get_pred(self, input):
+        model = self.fnn
+
+        with torch.no_grad():
+            output = model(input)
+            pred = output.max(0, keepdim=True)[1]
+
+        return int(pred)
 
     def main(self):
 
@@ -316,7 +330,9 @@ class Demo:
 
             sb = self.get_rate(True, False)
             #print(sb)
-            tk.Label(self.root, text=str(sb*100) + '%', font=("arial", 10), fg="black").place(x=340, y=220)
+            tk.Label(self.root, text=str(sb*100)[0:6] + '%', font=("arial", 9), fg="black").place(x=340, y=220)
+            tk.Label(self.root, text=str(self.t0)[0:5] + 's', font=("arial", 8), fg="black").place(x=400, y=220)
+            tk.Label(self.root, text='Pred: ' + str(self.get_pred(xa.view(28*28))), font=("arial", 7), fg="black").place(x=340, y=240)
 
         def paint_img2():
             features, labels = next(iter(self.test_loader))
@@ -345,9 +361,10 @@ class Demo:
             plt.imshow(img, cmap='gray')
 
             sa = self.get_rate(True, True)
-            print(sa)
-            tk.Label(self.root, text=str(sa*100) + '%', font=("arial", 10), fg="black").place(x=340, y=270)
-
+            #print(sa)
+            tk.Label(self.root, text=str(sa*100)[0:6] + '%', font=("arial", 9), fg="black").place(x=340, y=270)
+            tk.Label(self.root, text=str(self.t1)[0:5] + 's', font=("arial", 8), fg="black").place(x=400, y=270)
+            tk.Label(self.root, text='Pred: ' + str(self.get_pred(xa.view(28*28))), font=("arial", 7), fg="black").place(x=340, y=290)
 
         self.root.geometry('512x512')
         self.root.resizable(True, True)
