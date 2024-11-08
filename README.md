@@ -2,3 +2,6 @@
 
 ## Main results:
   *.ipynb
+
+
+### License: MIT
